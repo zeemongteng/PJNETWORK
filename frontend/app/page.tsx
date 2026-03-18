@@ -9,14 +9,16 @@ import { Separator } from '@/components/ui/separator'
 import { ShardGrid, type Shard } from '@/components/shard-card'
 import { ProtocolLog, type LogEntry } from '@/components/protocol-log'
 import { StatGrid } from '@/components/stat-card'
-import { shardData, reassembleShards, checkHealth } from '@/lib/api'
+import { shardData, reassembleShards, checkHealth, corruptShards, recoverData } from '@/lib/api'
 import { 
   Zap, 
   RotateCcw, 
   ShieldAlert, 
   Trash2,
   RefreshCw,
-  Activity
+  Activity,
+  AlertTriangle,
+  Wrench
 } from 'lucide-react'
 
 const DEFAULT_MESSAGE = `GBNL: Secure tactical communication at 0800 hours. Grid coordinates: 51.5074° N, 0.1278° W. Authentication code: ALPHA-7-DELTA.`
@@ -149,6 +151,91 @@ export default function VoidProtocolDemo() {
     addLog('Protocol state cleared', 'info')
   }
 
+  // Corrupt shards - unsorted
+  const handleCorruptUnsorted = async () => {
+    if (shards.length === 0) {
+      addLog('No shards to corrupt', 'warning')
+      return
+    }
+
+    setIsLoading(true)
+    addLog('Simulating shard corruption: Unsorted data...', 'warning')
+
+    try {
+      const response = await corruptShards(shards, 'unsorted')
+      setShards(response.corrupted_shards)
+      addLog(`Corruption applied: ${response.corruption_details}`, 'warning')
+      addLog(`Status: ${response.status}`, 'warning')
+    } catch (error) {
+      addLog('Corruption failed: Backend error', 'error')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  // Corrupt shards - incomplete
+  const handleCorruptIncomplete = async () => {
+    if (shards.length === 0) {
+      addLog('No shards to corrupt', 'warning')
+      return
+    }
+
+    setIsLoading(true)
+    addLog('Simulating shard corruption: Incomplete sharding...', 'warning')
+
+    try {
+      const response = await corruptShards(shards, 'incomplete')
+      setShards(response.corrupted_shards)
+      addLog(`Corruption applied: ${response.corruption_details}`, 'warning')
+      addLog(`Status: ${response.status}`, 'warning')
+    } catch (error) {
+      addLog('Corruption failed: Backend error', 'error')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  // Attempt recovery
+  const handleRecover = async () => {
+    if (shards.length === 0) {
+      addLog('No shards to recover from', 'warning')
+      return
+    }
+
+    setIsLoading(true)
+    addLog('Attempting data recovery...', 'info')
+
+    try {
+      const response = await recoverData(shards)
+      
+      if (response.success) {
+        setReassembledData(response.recovered_data)
+        addLog('Recovery successful! Data recovered.', 'success')
+      } else {
+        addLog(response.recovery_details, 'warning')
+        if (response.recovered_data) {
+          addLog(`Partial recovery: ${response.recovered_data.length} chars recovered`, 'info')
+          setReassembledData(response.recovered_data)
+        }
+      }
+
+      if (response.issues_found.length > 0) {
+        response.issues_found.forEach(issue => {
+          addLog(`Issue: ${issue}`, 'warning')
+        })
+      }
+    } catch (error) {
+      addLog('Recovery failed: Backend error', 'error')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  // Clear all
+  const handleClearLogs = () => {
+    setLogs([])
+  }
+
   const charCount = inputData.length
   const shardCount = shards.length
 
@@ -277,6 +364,57 @@ export default function VoidProtocolDemo() {
                     </span>
                   )}
                 </div>
+              </CardContent>
+            </Card>
+
+            {/* Corruption & Recovery Controls */}
+            <Card>
+              <CardHeader className="pb-4">
+                <CardTitle className="flex items-center gap-2">
+                  <AlertTriangle className="size-4 text-warning" />
+                  Corruption & Recovery
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-4">
+                <div className="space-y-2">
+                  <p className="font-mono text-xs text-muted-foreground uppercase tracking-wider">
+                    Simulate Data Corruption
+                  </p>
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={handleCorruptUnsorted}
+                      disabled={shards.length === 0 || isLoading}
+                      variant="outline"
+                      size="sm"
+                      className="flex-1 text-xs"
+                    >
+                      <AlertTriangle className="size-3" />
+                      Unsorted
+                    </Button>
+                    <Button
+                      onClick={handleCorruptIncomplete}
+                      disabled={shards.length === 0 || isLoading}
+                      variant="outline"
+                      size="sm"
+                      className="flex-1 text-xs"
+                    >
+                      <AlertTriangle className="size-3" />
+                      Incomplete
+                    </Button>
+                  </div>
+                </div>
+
+                <Separator />
+
+                <Button
+                  onClick={handleRecover}
+                  disabled={shards.length === 0 || isLoading}
+                  variant="outline"
+                  className="w-full"
+                >
+                  <Wrench className="size-4" />
+                  Attempt Recovery
+                </Button>
               </CardContent>
             </Card>
           </div>

@@ -52,6 +52,28 @@ class ReassembleResponse(BaseModel):
     error: str | None = None
 
 
+class CorruptionRequest(BaseModel):
+    shards: list[Shard]
+    corruption_type: str = "unsorted"  # unsorted, incomplete
+
+
+class CorruptionResponse(BaseModel):
+    corrupted_shards: list[Shard]
+    corruption_details: str
+    status: str
+
+
+class RecoveryRequest(BaseModel):
+    shards: list[Shard]
+
+
+class RecoveryResponse(BaseModel):
+    success: bool
+    recovered_data: str | None = None
+    recovery_details: str
+    issues_found: list[str]
+
+
 # ---------------------------------------------------------------------------
 # Void Protocol Implementation
 # ---------------------------------------------------------------------------
@@ -132,6 +154,89 @@ class VoidProtocol:
         
         return reconstructed_data
     
+    def simulate_corruption_unsorted(self, shards: list[dict]) -> tuple[list[dict], str]:
+        """Corrupt shards by randomizing their order - data will not sort properly"""
+        import random
+        corrupted = shards.copy()
+        random.shuffle(corrupted)
+        
+        # Mark as corrupted in metadata
+        for shard in corrupted:
+            shard["status"] = "corrupted"
+        
+        details = f"Shards shuffled randomly - {len(corrupted)} shards out of order"
+        return corrupted, details
+    
+    def simulate_corruption_incomplete(self, shards: list[dict]) -> tuple[list[dict], str]:
+        """Corrupt by creating incomplete sharding - less than 16 shards"""
+        import random
+        
+        # Keep only a random subset (between 1 and len-1)
+        num_to_keep = random.randint(1, max(1, len(shards) - 1))
+        corrupted = random.sample(shards, num_to_keep)
+        
+        # Mark as corrupted
+        for shard in corrupted:
+            shard["status"] = "corrupted"
+        
+        details = f"Incomplete sharding: Only {num_to_keep} of {len(shards)} shards created"
+        return corrupted, details
+    
+    def attempt_recovery(self, shards: list[dict]) -> tuple[str | None, list[str]]:
+        """Attempt to recover data from potentially corrupted shards"""
+        issues = []
+        
+        if not shards:
+            issues.append("No shards provided")
+            return None, issues
+        
+        # Check for multiple message IDs
+        message_ids = {shard["message_id"] for shard in shards}
+        if len(message_ids) > 1:
+            issues.append(f"Multiple message IDs detected: {len(message_ids)} different IDs")
+        
+        # Filter active shards
+        active_shards = [s for s in shards if s.get("active", True)]
+        if len(active_shards) < len(shards):
+            issues.append(f"Inactive shards detected: {len(shards) - len(active_shards)} inactive")
+        
+        # Check shard count
+        expected_total = shards[0]["total"] if shards else 0
+        if len(active_shards) < expected_total:
+            issues.append(f"Missing shards: Have {len(active_shards)}, expected {expected_total}")
+        
+        # Try to sort shards by index (recovery from unsorted)
+        try:
+            shards_sorted = sorted(active_shards, key=lambda x: x["index"])
+            
+            # Attempt to reassemble
+            reconstructed_data = ""
+            hash_errors = 0
+            
+            for shard in shards_sorted:
+                # Check integrity
+                expected_hash = self._hash_fragment(shard["payload"])
+                if shard["hash"] != expected_hash:
+                    hash_errors += 1
+                    issues.append(f"Hash mismatch at shard {shard['index']}: expected {expected_hash}, got {shard['hash']}")
+                    # Still include the shard data for partial recovery
+                
+                reconstructed_data += shard["payload"]
+            
+            if hash_errors > 0:
+                issues.append(f"Integrity check: {hash_errors} shard(s) failed hash verification")
+            
+            if reconstructed_data and len(active_shards) == expected_total:
+                return reconstructed_data, issues
+            elif reconstructed_data:
+                issues.append(f"Partial recovery possible: reconstructed {len(reconstructed_data)} chars")
+                return reconstructed_data, issues
+                
+        except Exception as e:
+            issues.append(f"Recovery attempt failed: {str(e)}")
+        
+        return None, issues
+    
     @staticmethod
     def _hash_fragment(fragment: str) -> str:
         """Generate SHA-256 hash of fragment"""
@@ -207,3 +312,70 @@ async def protocol_info() -> dict:
             "Tamper detection via hash mismatch"
         ]
     }
+
+
+@app.post("/corrupt", response_model=CorruptionResponse)
+async def corrupt_shards(request: CorruptionRequest) -> CorruptionResponse:
+    """
+    Simulate data corruption scenarios:
+    - unsorted: Randomize shard order (data won't sort properly)
+    - incomplete: Keep only subset of shards (< 16 shards)
+    
+    This endpoint is for testing recovery capabilities.
+    """
+    protocol = VoidProtocol()
+    
+    shards_dict = [s.model_dump() for s in request.shards]
+    
+    if request.corruption_type == "unsorted":
+        corrupted, details = protocol.simulate_corruption_unsorted(shards_dict)
+        status = "Data corrupted: Shards are out of order"
+    elif request.corruption_type == "incomplete":
+        corrupted, details = protocol.simulate_corruption_incomplete(shards_dict)
+        status = "Data corrupted: Incomplete sharding detected"
+    else:
+        return CorruptionResponse(
+            corrupted_shards=[],
+            corruption_details="Unknown corruption type",
+            status="Error"
+        )
+    
+    return CorruptionResponse(
+        corrupted_shards=[Shard(**s) for s in corrupted],
+        corruption_details=details,
+        status=status
+    )
+
+
+@app.post("/recover", response_model=RecoveryResponse)
+async def recover_data(request: RecoveryRequest) -> RecoveryResponse:
+    """
+    Attempt to recover data from corrupted shards.
+    
+    Recovery capabilities:
+    - Auto-sort shards by index
+    - Identify missing shards
+    - Verify hash integrity
+    - Perform partial recovery if possible
+    """
+    protocol = VoidProtocol()
+    
+    shards_dict = [s.model_dump() for s in request.shards]
+    recovered_data, issues = protocol.attempt_recovery(shards_dict)
+    
+    success = recovered_data is not None and len(issues) == 0
+    
+    details = "Recovery attempt completed"
+    if recovered_data and issues:
+        details = f"Partial recovery: {len(recovered_data)} chars recovered with {len(issues)} issue(s)"
+    elif recovered_data:
+        details = "Full recovery successful"
+    elif issues:
+        details = f"Recovery failed: {len(issues)} issue(s) detected"
+    
+    return RecoveryResponse(
+        success=success,
+        recovered_data=recovered_data,
+        recovery_details=details,
+        issues_found=issues
+    )

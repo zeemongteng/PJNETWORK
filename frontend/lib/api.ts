@@ -13,6 +13,19 @@ export interface ReassembleResponse {
   error: string | null
 }
 
+export interface CorruptionResponse {
+  corrupted_shards: Shard[]
+  corruption_details: string
+  status: string
+}
+
+export interface RecoveryResponse {
+  success: boolean
+  recovered_data: string | null
+  recovery_details: string
+  issues_found: string[]
+}
+
 export async function shardData(data: string, shardSize: number = 8): Promise<ShardResponse> {
   const response = await fetch('/api/shard', {
     method: 'POST',
@@ -40,6 +53,38 @@ export async function reassembleShards(shards: Shard[]): Promise<ReassembleRespo
   
   if (!response.ok) {
     throw new Error('Failed to reassemble data')
+  }
+  
+  return response.json()
+}
+
+export async function corruptShards(shards: Shard[], corruptionType: 'unsorted' | 'incomplete'): Promise<CorruptionResponse> {
+  const response = await fetch('/api/corrupt', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ shards, corruption_type: corruptionType }),
+  })
+  
+  if (!response.ok) {
+    throw new Error('Failed to corrupt shards')
+  }
+  
+  return response.json()
+}
+
+export async function recoverData(shards: Shard[]): Promise<RecoveryResponse> {
+  const response = await fetch('/api/recover', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ shards }),
+  })
+  
+  if (!response.ok) {
+    throw new Error('Failed to attempt recovery')
   }
   
   return response.json()
