@@ -6,7 +6,9 @@
       "Bash(node -e \"require\\(''''./node_modules/typescript''''\\)\")",
       "Bash(npm run:*)",
       "Bash(npm install:*)",
-      "Bash(npx vercel:*)"
+      "Bash(npx vercel:*)",
+      "Bash(pip install:*)",
+      "Bash(python -c \"from main import app; print\\(''''OK — routes:'''', [r.path for r in app.routes]\\)\")"
     ]
   }
 }

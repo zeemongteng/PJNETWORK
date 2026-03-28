@@ -11,6 +11,8 @@ Architecture (4 Layers):
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 from pydantic import BaseModel
 from typing import Optional
 from enum import Enum
@@ -27,6 +29,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class StripApiPrefixMiddleware(BaseHTTPMiddleware):
+    """
+    Strip the /api prefix added by Vercel's router before it reaches FastAPI.
+    In development, Next.js already strips it via rewrites in next.config.ts.
+    In production on Vercel, the route /api/(.*) → main.py preserves the full
+    path, so FastAPI would receive /api/health instead of /health → 404.
+    """
+    async def dispatch(self, request: Request, call_next):
+        if request.scope["path"].startswith("/api/"):
+            request.scope["path"] = request.scope["path"][4:]  # /api/x → /x
+        elif request.scope["path"] == "/api":
+            request.scope["path"] = "/"
+        return await call_next(request)
+
+app.add_middleware(StripApiPrefixMiddleware)
 
 
 # ===========================================================================
