@@ -3,7 +3,10 @@
     "allow": [
       "Bash(find /d/PJNETWORK -type f -not -path */node_modules/* -not -path */.next/* -not -path */.git/*)",
       "Bash(find /d/PJNETWORK -type f \\\\\\(-name *.md -o -name README* -o -name *.txt \\\\\\))",
-      "Bash(node -e \"require\\(''''./node_modules/typescript''''\\)\")"
+      "Bash(node -e \"require\\(''''./node_modules/typescript''''\\)\")",
+      "Bash(npm run:*)",
+      "Bash(npm install:*)",
+      "Bash(npx vercel:*)"
     ]
   }
 }
