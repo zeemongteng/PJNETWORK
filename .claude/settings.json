@@ -9,7 +9,8 @@
       "Bash(npx vercel:*)",
       "Bash(pip install:*)",
       "Bash(python -c \"from main import app; print\\(''''OK — routes:'''', [r.path for r in app.routes]\\)\")",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(k,v\\) for k,v in {**d.get\\(''''dependencies'''',{}\\),**d.get\\(''''devDependencies'''',{}\\)}.items\\(\\)]\")"
     ]
   }
 }
