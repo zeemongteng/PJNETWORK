@@ -140,12 +140,35 @@ export interface RecoveryResponse {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+export class ApiError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...init,
   })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`
+    try {
+      const body = await res.json()
+      if (typeof body?.detail === 'string') {
+        detail = body.detail
+      } else if (Array.isArray(body?.detail) && body.detail.length > 0) {
+        // Pydantic v2 validation errors — each item has a `msg` and `loc`
+        detail = body.detail
+          .map((e: { msg?: string; loc?: unknown[] }) =>
+            `${(e.loc ?? []).slice(1).join('.')}: ${e.msg ?? JSON.stringify(e)}`
+          )
+          .join(' | ')
+      }
+    } catch { /* ignore JSON parse failures */ }
+    throw new ApiError(res.status, detail)
+  }
   return res.json()
 }
 

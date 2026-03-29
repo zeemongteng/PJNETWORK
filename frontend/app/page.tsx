@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -17,8 +17,9 @@ import { Sentinel } from '@/components/sentinel'
 import {
   checkHealth, getTopology, getSentinelStatus,
   shardData, reassembleShards, corruptShards, recoverData,
+  ApiError,
 } from '@/lib/api'
-import type { NetworkTopology, SentinelStatus } from '@/lib/api'
+import type { NetworkTopology, SentinelStatus, ThreatLevel } from '@/lib/api'
 import {
   Activity, Zap, RotateCcw, ShieldAlert, Trash2,
   RefreshCw, AlertTriangle, Wrench, Wifi, WifiOff,
@@ -116,11 +117,16 @@ export default function GBNLCommandCenter() {
   const [reassembledData, setReassembledData] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const shardSize = 8
+  const [activeSessions, setActiveSessions] = useState(0)
+  const shardsRef = useRef<Shard[]>([])
 
   const addLog = useCallback((message: string, type: LogEntry['type'] = 'info') => {
     const time = new Date().toTimeString().split(' ')[0]
     setLogs(prev => [{ time, message, type }, ...prev.slice(0, 49)])
   }, [])
+
+  // Keep shardsRef in sync for cross-layer callbacks
+  useEffect(() => { shardsRef.current = shards }, [shards])
 
   // Initial system check
   useEffect(() => {
@@ -166,8 +172,8 @@ export default function GBNLCommandCenter() {
       setReassembledData(null)
       addLog(`Sharded into ${res.total_shards} fragments — each routed via separate Ghost Web paths`, 'success')
       addLog(`Message ID: ${res.message_id.slice(0, 8)}… | Intercepted shard = useless garbage`, 'info')
-    } catch {
-      addLog('Sharding failed — backend error', 'error')
+    } catch (err) {
+      addLog(`Sharding failed — ${err instanceof Error ? err.message : 'unknown error'}`, 'error')
     } finally {
       setIsLoading(false)
     }
@@ -190,8 +196,8 @@ export default function GBNLCommandCenter() {
       } else {
         addLog(`Reassembly failed: ${res.error}`, 'error')
       }
-    } catch {
-      addLog('Reassembly failed — backend error', 'error')
+    } catch (err) {
+      addLog(`Reassembly failed — ${err instanceof Error ? err.message : 'unknown error'}`, 'error')
     } finally {
       setIsLoading(false)
     }
@@ -222,8 +228,8 @@ export default function GBNLCommandCenter() {
       const res = await corruptShards(shards, 'unsorted')
       setShards(res.corrupted_shards)
       addLog(res.corruption_details, 'warning')
-    } catch {
-      addLog('Corruption simulation failed', 'error')
+    } catch (err) {
+      addLog(`Corruption simulation failed — ${err instanceof Error ? err.message : 'unknown error'}`, 'error')
     } finally {
       setIsLoading(false)
     }
@@ -237,8 +243,8 @@ export default function GBNLCommandCenter() {
       const res = await corruptShards(shards, 'incomplete')
       setShards(res.corrupted_shards)
       addLog(res.corruption_details, 'warning')
-    } catch {
-      addLog('Corruption simulation failed', 'error')
+    } catch (err) {
+      addLog(`Corruption simulation failed — ${err instanceof Error ? err.message : 'unknown error'}`, 'error')
     } finally {
       setIsLoading(false)
     }
@@ -258,16 +264,125 @@ export default function GBNLCommandCenter() {
         if (res.recovered_data) setReassembledData(res.recovered_data)
       }
       res.issues_found.forEach(issue => addLog(`Issue: ${issue}`, 'warning'))
-    } catch {
-      addLog('Recovery failed — backend error', 'error')
+    } catch (err) {
+      addLog(`Recovery failed — ${err instanceof Error ? err.message : 'unknown error'}`, 'error')
     } finally {
       setIsLoading(false)
     }
   }
 
+  // ─── Cross-layer callbacks ────────────────────────────────────────────────
+
+  const handleNetworkChange = useCallback(async (topo: NetworkTopology) => {
+    setTopology(topo)
+
+    // Refresh sentinel overview since network state drives threat level
+    try {
+      const sentinel = await getSentinelStatus()
+      setSentinelStatus(sentinel)
+    } catch { /* ignore */ }
+
+    const currentShards = shardsRef.current
+    const activeShards = currentShards.filter(s => s.active)
+
+    // Shard route disruption: nodes destroyed = paths severed
+    if (activeShards.length > 0 && topo.connectivity_percent < 80) {
+      const lossRatio =
+        topo.connectivity_percent < 25 ? 0.70 :
+        topo.connectivity_percent < 50 ? 0.40 : 0.15
+      const lossCount = Math.max(1, Math.floor(activeShards.length * lossRatio))
+      const toKill = new Set(activeShards.slice(0, lossCount).map(s => s.index))
+      setShards(prev => prev.map(s =>
+        toKill.has(s.index) ? { ...s, status: 'lost' as const, active: false } : s
+      ))
+      addLog(
+        `Ghost Web: ${lossCount} shard path(s) severed — fragments lost in mesh (connectivity ${topo.connectivity_percent.toFixed(0)}%)`,
+        'error',
+      )
+      if (topo.connectivity_percent < 30) {
+        addLog('VOID PROTOCOL COMPROMISED — mesh too degraded for reliable sharding', 'error')
+      }
+    }
+
+    // Auto-recovery: if network restored and lost shards exist, re-route them
+    const lostShards = currentShards.filter(s => !s.active)
+    if (topo.connectivity_percent >= 90 && lostShards.length > 0) {
+      addLog(`Ghost Web restored — rerouting ${lostShards.length} lost shard(s) via redundant paths…`, 'info')
+      try {
+        const res = await recoverData(currentShards)
+        if (res.success && res.recovered_data) {
+          setShards(prev => prev.map(s => ({ ...s, active: true, status: 'delivered' as const })))
+          setReassembledData(res.recovered_data)
+          addLog('Shard auto-recovery complete — all paths re-established, message integrity verified', 'success')
+        } else {
+          setShards(prev => prev.map(s => s.active ? s : { ...s, status: 'transit' as const, active: true }))
+          addLog(`Partial shard recovery: ${res.recovery_details}`, 'warning')
+          res.issues_found.forEach(issue => addLog(`Recovery: ${issue}`, 'warning'))
+        }
+      } catch {
+        addLog('Auto-recovery failed — use manual Attempt Recovery in Void Protocol', 'error')
+      }
+    }
+  }, [addLog])
+
+  const handleSessionChange = useCallback((activeCount: number) => {
+    setActiveSessions(activeCount)
+    if (activeCount === 0 && shardsRef.current.length > 0) {
+      addLog('Active Skin: all sessions ended — Void Protocol transmission requires re-authentication', 'warning')
+    }
+  }, [addLog])
+
+  const handleThreatChange = useCallback((level: ThreatLevel, count: number) => {
+    setSentinelStatus(prev => prev
+      ? { ...prev, overall_threat_level: level, anomalies_detected: count }
+      : null
+    )
+  }, [])
+
+  // ─── Error scenario tests ─────────────────────────────────────────────────
+
+  const runErrorTest = async (label: string, fn: () => Promise<unknown>) => {
+    addLog(`[ERROR TEST] ${label}`, 'warning')
+    try {
+      await fn()
+      addLog(`[ERROR TEST] ${label} — no error thrown (unexpected)`, 'error')
+    } catch (err) {
+      const status = err instanceof ApiError ? ` HTTP ${err.status}` : ''
+      addLog(`[ERROR TEST] ${label} →${status} "${err instanceof Error ? err.message : err}"`, 'success')
+    }
+  }
+
+  const handleTestEmptyData = () =>
+    runErrorTest('Empty data → /shard', () => shardData('', 8))
+
+  const handleTestInvalidShardSize = () =>
+    runErrorTest('shard_size=0 → /shard', () => shardData('test', 0))
+
+  const handleTestShardSizeTooLarge = () =>
+    runErrorTest('shard_size=999 → /shard', () => shardData('test', 999))
+
+  const handleTestReassembleEmpty = async () => {
+    addLog('[ERROR TEST] Empty shard list → /reassemble', 'warning')
+    try {
+      const res = await reassembleShards([])
+      addLog(
+        `[ERROR TEST] Returned success=${res.success}${res.error ? ` error="${res.error}"` : ''}`,
+        res.success ? 'error' : 'success',
+      )
+    } catch (err) {
+      const status = err instanceof ApiError ? ` HTTP ${err.status}` : ''
+      addLog(`[ERROR TEST] Threw${status} "${err instanceof Error ? err.message : err}"`, 'success')
+    }
+  }
+
+  const handleTestBadCorruptType = () =>
+    runErrorTest('Unknown corruption type → /corrupt', () =>
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      corruptShards(shards.length ? shards : [], 'invalid_type' as any),
+    )
+
   // ─── Computed overview values ──────────────────────────────────────────────
 
-  const activeSessions = 0  // will be shown via Active Skin tab
   const threatLevel = sentinelStatus?.overall_threat_level ?? 'none'
   const threatColor = { none: 'text-muted-foreground', low: 'text-success', medium: 'text-warning', high: 'text-orange-400', critical: 'text-destructive' }[threatLevel]
   const connectivity = topology?.connectivity_percent ?? 0
@@ -419,7 +534,7 @@ export default function GBNLCommandCenter() {
                 <h2 className="font-mono text-sm font-semibold text-primary">Layer 2: Ghost Web</h2>
                 <span className="font-mono text-xs text-muted-foreground">— Decentralized Mesh Network</span>
               </div>
-              <GhostWeb onLog={addLog} />
+              <GhostWeb onLog={addLog} onNetworkChange={handleNetworkChange} />
             </div>
           </TabsContent>
 
@@ -431,7 +546,7 @@ export default function GBNLCommandCenter() {
                 <h2 className="font-mono text-sm font-semibold text-violet-400">Layer 1: Active Skin Interface</h2>
                 <span className="font-mono text-xs text-muted-foreground">— Biometric Auth & Kill Switch</span>
               </div>
-              <ActiveSkin onLog={addLog} />
+              <ActiveSkin onLog={addLog} onSessionChange={handleSessionChange} />
             </div>
           </TabsContent>
 
@@ -443,6 +558,36 @@ export default function GBNLCommandCenter() {
                 <h2 className="font-mono text-sm font-semibold text-emerald-400">Layer 3: Void Protocol</h2>
                 <span className="font-mono text-xs text-muted-foreground">— Data Sharding & Multi-Path Delivery</span>
               </div>
+
+              {/* Cross-layer status */}
+              {backendStatus === 'online' && (
+                <div className="grid sm:grid-cols-2 gap-2">
+                  <div className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono ${
+                    activeSessions > 0
+                      ? 'border-success/30 bg-success/10 text-success'
+                      : 'border-warning/30 bg-warning/10 text-warning'
+                  }`}>
+                    <span className={`size-1.5 rounded-full ${activeSessions > 0 ? 'bg-success animate-pulse' : 'bg-warning'}`} />
+                    {activeSessions > 0
+                      ? `Active Skin: ${activeSessions} authenticated unit(s) — transmission authorized`
+                      : 'Active Skin: no authenticated units — transmission locked'}
+                  </div>
+                  <div className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono ${
+                    connectivity >= 80
+                      ? 'border-success/30 bg-success/10 text-success'
+                      : connectivity >= 40
+                      ? 'border-warning/30 bg-warning/10 text-warning'
+                      : 'border-destructive/30 bg-destructive/10 text-destructive'
+                  }`}>
+                    <span className={`size-1.5 rounded-full ${connectivity >= 80 ? 'bg-success animate-pulse' : connectivity >= 40 ? 'bg-warning' : 'bg-destructive animate-pulse'}`} />
+                    {connectivity >= 80
+                      ? `Ghost Web: ${connectivity.toFixed(0)}% mesh — shard paths nominal`
+                      : connectivity >= 40
+                      ? `Ghost Web: ${connectivity.toFixed(0)}% mesh — shard delivery degraded`
+                      : `Ghost Web: ${connectivity.toFixed(0)}% mesh — VOID PROTOCOL COMPROMISED`}
+                  </div>
+                </div>
+              )}
 
               <div className="grid lg:grid-cols-[1fr_1.5fr] gap-4">
                 {/* Left col */}
@@ -464,29 +609,31 @@ export default function GBNLCommandCenter() {
                       <StatGrid charCount={inputData.length} shardCount={shards.length} shardSize={shardSize} />
                       <div className="flex gap-2">
                         <Button
+                          type="button"
                           onClick={handleShardData}
-                          disabled={isLoading || backendStatus !== 'online'}
+                          disabled={isLoading || backendStatus !== 'online' || activeSessions === 0 || connectivity < 30}
                           variant="terminal"
                           className="flex-1"
+                          title={activeSessions === 0 ? 'Requires authenticated unit' : connectivity < 30 ? 'Mesh too degraded' : undefined}
                         >
                           <Zap className="size-4" />
                           Shard & Transmit
                         </Button>
-                        <Button type="button" onClick={() => { setShards([]); setReassembledData(null) }} variant="outline">
+                        <Button type="button" onClick={() => { setShards([]); setReassembledData(null) }} variant="outline" aria-label="Clear shards">
                           <Trash2 className="size-4" />
                         </Button>
                       </div>
                       <Separator />
                       <p className="font-mono text-xs text-muted-foreground uppercase tracking-wider">Simulation</p>
                       <div className="flex gap-2">
-                        <Button onClick={handleIntercept} disabled={!shards.length || isLoading} variant="outline" className="flex-1 text-xs">
+                        <Button type="button" onClick={handleIntercept} disabled={!shards.length || isLoading} variant="outline" className="flex-1 text-xs">
                           <ShieldAlert className="size-3" /> Intercept Shard
                         </Button>
-                        <Button onClick={handleReassemble} disabled={!shards.length || isLoading} variant="outline" className="flex-1 text-xs">
+                        <Button type="button" onClick={handleReassemble} disabled={!shards.length || isLoading} variant="outline" className="flex-1 text-xs">
                           <RefreshCw className="size-3" /> Reassemble
                         </Button>
                       </div>
-                      <Button onClick={handleRestore} disabled={!shards.length} variant="outline" className="text-xs">
+                      <Button type="button" onClick={handleRestore} disabled={!shards.length} variant="outline" className="text-xs">
                         <RotateCcw className="size-3" /> Restore All Shards
                       </Button>
                     </CardContent>
@@ -517,16 +664,49 @@ export default function GBNLCommandCenter() {
                     </CardHeader>
                     <CardContent className="space-y-3">
                       <div className="flex gap-2">
-                        <Button onClick={handleCorruptUnsorted} disabled={!shards.length || isLoading} variant="outline" size="sm" className="flex-1 text-xs">
+                        <Button type="button" onClick={handleCorruptUnsorted} disabled={!shards.length || isLoading} variant="outline" size="sm" className="flex-1 text-xs">
                           <AlertTriangle className="size-3" /> Unsorted
                         </Button>
-                        <Button onClick={handleCorruptIncomplete} disabled={!shards.length || isLoading} variant="outline" size="sm" className="flex-1 text-xs">
+                        <Button type="button" onClick={handleCorruptIncomplete} disabled={!shards.length || isLoading} variant="outline" size="sm" className="flex-1 text-xs">
                           <AlertTriangle className="size-3" /> Incomplete
                         </Button>
                       </div>
-                      <Button onClick={handleRecover} disabled={!shards.length || isLoading} variant="outline" className="w-full text-xs">
+                      <Button type="button" onClick={handleRecover} disabled={!shards.length || isLoading} variant="outline" className="w-full text-xs">
                         <Wrench className="size-3" /> Attempt Recovery
                       </Button>
+                    </CardContent>
+                  </Card>
+
+                  {/* Error scenario tests */}
+                  <Card className="border-destructive/30">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="flex items-center gap-2 text-sm text-destructive">
+                        <ShieldAlert className="size-4" />
+                        Error Scenario Tests
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-2">
+                      <p className="font-mono text-xs text-muted-foreground">
+                        Trigger deliberate errors to verify backend validation and error propagation.
+                        Results appear in the System Log.
+                      </p>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button type="button" onClick={handleTestEmptyData} disabled={backendStatus !== 'online'} variant="outline" size="sm" className="text-xs text-destructive border-destructive/40 hover:bg-destructive/10">
+                          Empty data → 400
+                        </Button>
+                        <Button type="button" onClick={handleTestInvalidShardSize} disabled={backendStatus !== 'online'} variant="outline" size="sm" className="text-xs text-destructive border-destructive/40 hover:bg-destructive/10">
+                          shard_size=0 → 422
+                        </Button>
+                        <Button type="button" onClick={handleTestShardSizeTooLarge} disabled={backendStatus !== 'online'} variant="outline" size="sm" className="text-xs text-destructive border-destructive/40 hover:bg-destructive/10">
+                          shard_size=999 → 422
+                        </Button>
+                        <Button type="button" onClick={handleTestReassembleEmpty} disabled={backendStatus !== 'online'} variant="outline" size="sm" className="text-xs text-destructive border-destructive/40 hover:bg-destructive/10">
+                          Reassemble [] → err
+                        </Button>
+                        <Button type="button" onClick={handleTestBadCorruptType} disabled={backendStatus !== 'online'} variant="outline" size="sm" className="col-span-2 text-xs text-destructive border-destructive/40 hover:bg-destructive/10">
+                          Bad corruption type → 400
+                        </Button>
+                      </div>
                     </CardContent>
                   </Card>
                 </div>
@@ -557,7 +737,7 @@ export default function GBNLCommandCenter() {
                 <h2 className="font-mono text-sm font-semibold text-orange-400">Layer 4: The Sentinel</h2>
                 <span className="font-mono text-xs text-muted-foreground">— AI Threat Detection & Tactical Haptics</span>
               </div>
-              <Sentinel onLog={addLog} />
+              <Sentinel onLog={addLog} onThreatChange={handleThreatChange} />
             </div>
           </TabsContent>
         </Tabs>

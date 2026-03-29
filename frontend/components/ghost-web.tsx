@@ -202,19 +202,21 @@ function NodeLegend() {
 
 interface Props {
   onLog: (msg: string, type?: 'info' | 'success' | 'warning' | 'error') => void
+  onNetworkChange?: (topo: NetworkTopology) => void
 }
 
-export function GhostWeb({ onLog }: Props) {
+export function GhostWeb({ onLog, onNetworkChange }: Props) {
   const [topology, setTopology] = useState<NetworkTopology | null>(null)
   const [loading, setLoading] = useState(false)
   const [attackPct, setAttackPct] = useState(30)
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<NetworkTopology | null> => {
     try {
       const t = await getTopology()
       setTopology(t)
+      return t
     } catch {
-      // silently ignore — parent shows offline state
+      return null
     }
   }, [])
 
@@ -231,7 +233,8 @@ export function GhostWeb({ onLog }: Props) {
       onLog(`Enemy attack: ${res.destroyed.length} nodes destroyed`, 'error')
       onLog(`Mesh resilience: ${res.mesh_resilience}`, res.connectivity_percent > 70 ? 'warning' : 'error')
       onLog(`Connectivity: ${res.connectivity_percent.toFixed(1)}% — Swarm Tactical Synchronization active`, 'info')
-      await refresh()
+      const topo = await refresh()
+      if (topo) onNetworkChange?.(topo)
     } catch {
       onLog('Attack simulation failed', 'error')
     } finally {
@@ -244,7 +247,8 @@ export function GhostWeb({ onLog }: Props) {
     try {
       await resetNetwork()
       onLog('Network fully restored — all nodes operational', 'success')
-      await refresh()
+      const topo = await refresh()
+      if (topo) onNetworkChange?.(topo)
     } catch {
       onLog('Reset failed', 'error')
     } finally {
@@ -348,6 +352,8 @@ export function GhostWeb({ onLog }: Props) {
               value={attackPct}
               onChange={e => setAttackPct(Number(e.target.value))}
               className="flex-1 accent-destructive"
+              aria-label="Attack percentage"
+              title="Attack percentage"
             />
             <span className="font-mono text-xs text-destructive w-8 text-right">{attackPct}%</span>
           </div>

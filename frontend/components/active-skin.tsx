@@ -120,9 +120,10 @@ function SessionCard({
 
 interface Props {
   onLog: (msg: string, type?: 'info' | 'success' | 'warning' | 'error') => void
+  onSessionChange?: (activeCount: number) => void
 }
 
-export function ActiveSkin({ onLog }: Props) {
+export function ActiveSkin({ onLog, onSessionChange }: Props) {
   const [unitId, setUnitId] = useState('UNIT-ALPHA-7')
   const [pulse, setPulse] = useState(72)
   const [stress, setStress] = useState(0.15)
@@ -148,10 +149,11 @@ export function ActiveSkin({ onLog }: Props) {
     try {
       const res = await getSessions()
       setSessions(res.sessions)
+      onSessionChange?.(res.active_count)
     } catch {
       // offline
     }
-  }, [])
+  }, [onSessionChange])
 
   useEffect(() => {
     refreshSessions()

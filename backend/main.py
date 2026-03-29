@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from enum import Enum
 import hashlib, math, uuid, random, time
@@ -119,7 +119,7 @@ class NetworkTopology(BaseModel):
 
 
 class AttackRequest(BaseModel):
-    percentage: float = 30.0  # percent of non-CC nodes to destroy
+    percentage: float = Field(default=30.0, ge=1.0, le=100.0)  # percent of non-CC nodes to destroy
 
 
 class AttackResponse(BaseModel):
@@ -213,7 +213,7 @@ class ScanResponse(BaseModel):
 
 class ShardRequest(BaseModel):
     data: str
-    shard_size: int = 8
+    shard_size: int = Field(default=8, ge=1, le=64)
 
 
 class Shard(BaseModel):
@@ -864,6 +864,8 @@ async def clear_alerts() -> dict:
 
 @app.post("/shard", response_model=ShardResponse)
 async def shard_data(request: ShardRequest) -> ShardResponse:
+    if not request.data.strip():
+        raise HTTPException(status_code=400, detail="Data cannot be empty")
     protocol = VoidProtocol(shard_size=request.shard_size)
     message_id, shards = protocol.shard_data(request.data)
     return ShardResponse(
@@ -895,7 +897,10 @@ async def corrupt_shards(request: CorruptionRequest) -> CorruptionResponse:
         corrupted, details = protocol.simulate_corruption_incomplete(shards_dict)
         status = "Incomplete shards — partial data only"
     else:
-        return CorruptionResponse(corrupted_shards=[], corruption_details="Unknown type", status="Error")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown corruption type: {request.corruption_type!r}. Valid values: unsorted, incomplete",
+        )
     return CorruptionResponse(
         corrupted_shards=[Shard(**s) for s in corrupted],
         corruption_details=details,

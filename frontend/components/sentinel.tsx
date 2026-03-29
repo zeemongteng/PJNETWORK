@@ -214,9 +214,10 @@ function HapticSimulator({ alerts }: { alerts: ThreatAlert[] }) {
 
 interface Props {
   onLog: (msg: string, type?: 'info' | 'success' | 'warning' | 'error') => void
+  onThreatChange?: (level: ThreatLevel, count: number) => void
 }
 
-export function Sentinel({ onLog }: Props) {
+export function Sentinel({ onLog, onThreatChange }: Props) {
   const [status, setStatus] = useState<SentinelStatus | null>(null)
   const [scanning, setScanning] = useState(false)
 
@@ -224,8 +225,9 @@ export function Sentinel({ onLog }: Props) {
     try {
       const s = await getSentinelStatus()
       setStatus(s)
+      onThreatChange?.(s.overall_threat_level, s.anomalies_detected)
     } catch { /* offline */ }
-  }, [])
+  }, [onThreatChange])
 
   useEffect(() => {
     refresh()
